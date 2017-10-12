@@ -99,12 +99,7 @@ class CGroup:
         return CGroup(self.path.parent)
 
 
-def test(num_clients, tcp_window_size, time, cpulimit, bandwidth=None, cpuset=None):
-    iperf_config = ['-N', '-w', str(tcp_window_size), '-l', str(tcp_window_size)]
-
-    if bandwidth:
-        iperf_config += ['-b', str(bandwidth)]
-
+def test(num_clients, time, cpulimit, iperf_args=[], cpuset=None):
     data_dir = pathlib.Path(__file__).resolve().parent
 
     if pathlib.Path('/sys/module/mac80211_hwsim').exists():
@@ -144,7 +139,7 @@ def test(num_clients, tcp_window_size, time, cpulimit, bandwidth=None, cpuset=No
 
         stack.enter_context(ap_ns.daemon('hostapd', str(data_dir / 'hostapd.conf')))
 
-        stack.enter_context(ap_ns.daemon('iperf', '-s', *iperf_config, preexec_fn=cpuset_cg.add_self))
+        stack.enter_context(ap_ns.daemon('iperf', '-s', *iperf_args, preexec_fn=cpuset_cg.add_self))
 
         client_namespaces = []
         wpa_clis = []
@@ -171,17 +166,15 @@ def test(num_clients, tcp_window_size, time, cpulimit, bandwidth=None, cpuset=No
                     break
 
         for client_ns in client_namespaces:
-            stack.enter_context(client_ns.popen('iperf', '-c', '192.168.200.1', '-t', str(time), *iperf_config, preexec_fn=cpuset_cg.add_self))
+            stack.enter_context(client_ns.popen('iperf', '-c', '192.168.200.1', '-t', str(time), *iperf_args, preexec_fn=cpuset_cg.add_self))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--num-clients', type=int, default=1)
     parser.add_argument('--time', type=int, default=10, help="in seconds")
-    parser.add_argument('--tcp-window-size', default='416K', help="in bytes (K/M/G suffixes allowed)")
-    parser.add_argument('--bandwidth', help="in bits per second (K/M/G suffixes allowed)")
-
     parser.add_argument('--cpuset', type=str, help="Bind all iperf processes to a specific CPU core(s)")
-    parser.add_argument('--cpulimit', type=int, help="Limit CPU usage (in %, 1 core = 100%)", default=100)
+    parser.add_argument('--cpulimit', type=int, help="Limit CPU usage (in %%, 1 core = 100%%)", default=100)
+    parser.add_argument('iperf_args', nargs='*')
 
     test(**vars(parser.parse_args()))
