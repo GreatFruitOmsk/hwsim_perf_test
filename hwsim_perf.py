@@ -6,6 +6,7 @@ import contextlib
 import locale
 import pathlib
 import subprocess
+import sys
 import tempfile
 
 
@@ -57,8 +58,9 @@ class NetNS:
         return command('iw', 'phy', wdev.phy, 'set', 'netns', 'name', self.name)
 
 
-def test(num_clients, tcp_window_size, time, bandwidth=None):
+def test(num_clients, tcp_window_size, time, bandwidth=None, cpu=None):
     iperf_config = ['-N', '-w', str(tcp_window_size), '-l', str(tcp_window_size)]
+    cpu_config = [] if cpu is None else ['taskset', '-ac', str(cpu)]
 
     if bandwidth:
         iperf_config += ['-b', str(bandwidth)]
@@ -90,7 +92,7 @@ def test(num_clients, tcp_window_size, time, bandwidth=None):
 
         stack.enter_context(ap_ns.daemon('hostapd', str(data_dir / 'hostapd.conf')))
 
-        stack.enter_context(ap_ns.daemon('iperf', '-s', *iperf_config))
+        stack.enter_context(ap_ns.daemon(*cpu_config, 'iperf', '-s', *iperf_config))
 
         client_namespaces = []
         wpa_clis = []
@@ -117,7 +119,7 @@ def test(num_clients, tcp_window_size, time, bandwidth=None):
                     break
 
         for client_ns in client_namespaces:
-            stack.enter_context(client_ns.popen('iperf', '-c', '192.168.200.1', '-t', str(time), *iperf_config))
+            stack.enter_context(client_ns.popen(*cpu_config, 'iperf', '-c', '192.168.200.1', '-t', str(time), *iperf_config))
 
 
 if __name__ == '__main__':
@@ -126,4 +128,8 @@ if __name__ == '__main__':
     parser.add_argument('--time', type=int, default=10, help="in seconds")
     parser.add_argument('--tcp-window-size', default='416K', help="in bytes (K/M/G suffixes allowed)")
     parser.add_argument('--bandwidth', help="in bits per second (K/M/G suffixes allowed)")
+
+    if sys.platform == 'linux':
+        parser.add_argument('--cpu', type=int, help="Bind all iperf processes to a specific CPU core")
+
     test(**vars(parser.parse_args()))
