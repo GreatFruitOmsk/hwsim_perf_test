@@ -4,6 +4,7 @@ import argparse
 import collections
 import contextlib
 import locale
+import os
 import pathlib
 import subprocess
 import sys
@@ -58,9 +59,48 @@ class NetNS:
         return command('iw', 'phy', wdev.phy, 'set', 'netns', 'name', self.name)
 
 
-def test(num_clients, tcp_window_size, time, bandwidth=None, cpu=None):
+class CGroup:
+    ROOT = pathlib.Path('/sys/fs/cgroup')
+
+    def __init__(self, path):
+        self.path = self.ROOT / path
+
+    def __enter__(self):
+        if not self.path.exists():
+            self.path.mkdir(parents=True)
+
+        return self
+
+    def __exit__(self, *_):
+        my_pid = str(os.getpid())
+
+        if my_pid in self['tasks'].split():
+            self.parent.add_task(my_pid)
+
+        self.path.rmdir()
+
+    def __getitem__(self, item):
+        return (self.path / item).read_text()
+
+    def __setitem__(self, item, value):
+        (self.path / item).write_text(str(value))
+
+    def add_task(self, task):
+        if hasattr(task, 'pid'):
+            task = task.pid
+
+        self['tasks'] = task
+
+    def add_self(self):
+        self.add_task(os.getpid())
+
+    @property
+    def parent(self):
+        return CGroup(self.path.parent)
+
+
+def test(num_clients, tcp_window_size, time, cpulimit, bandwidth=None, cpuset=None):
     iperf_config = ['-N', '-w', str(tcp_window_size), '-l', str(tcp_window_size)]
-    cpu_config = [] if cpu is None else ['taskset', '-ac', str(cpu)]
 
     if bandwidth:
         iperf_config += ['-b', str(bandwidth)]
@@ -84,6 +124,18 @@ def test(num_clients, tcp_window_size, time, bandwidth=None, cpu=None):
     sim_devs = sim_devs[1:]
 
     with contextlib.ExitStack() as stack:
+        cpu_cg = stack.enter_context(CGroup('cpu/hwsim_perf'))
+        cpu_cg['cpu.cfs_period_us'] = 100 * 1000
+        cpu_cg['cpu.cfs_quota_us'] = cpulimit * 1000
+        cpu_cg.add_self()
+
+        cpuset_cg = stack.enter_context(CGroup('cpuset/hwsim_perf'))
+        cpuset_cg['cpuset.mems'] = cpuset_cg.parent['cpuset.mems']
+        if cpuset is None:
+            cpuset_cg['cpuset.cpus'] = cpuset_cg.parent['cpuset.cpus']
+        else:
+            cpuset_cg['cpuset.cpus'] = cpuset
+
         ap_ns = stack.enter_context(NetNS('access_point'))
         ap_ns.move_phy(ap_dev)
         ap_ns.command('ip', 'link', 'set', 'dev', ap_dev.dev, 'name', 'wlan_ap')
@@ -92,7 +144,7 @@ def test(num_clients, tcp_window_size, time, bandwidth=None, cpu=None):
 
         stack.enter_context(ap_ns.daemon('hostapd', str(data_dir / 'hostapd.conf')))
 
-        stack.enter_context(ap_ns.daemon(*cpu_config, 'iperf', '-s', *iperf_config))
+        stack.enter_context(ap_ns.daemon('iperf', '-s', *iperf_config, preexec_fn=cpuset_cg.add_self))
 
         client_namespaces = []
         wpa_clis = []
@@ -119,7 +171,7 @@ def test(num_clients, tcp_window_size, time, bandwidth=None, cpu=None):
                     break
 
         for client_ns in client_namespaces:
-            stack.enter_context(client_ns.popen(*cpu_config, 'iperf', '-c', '192.168.200.1', '-t', str(time), *iperf_config))
+            stack.enter_context(client_ns.popen('iperf', '-c', '192.168.200.1', '-t', str(time), *iperf_config, preexec_fn=cpuset_cg.add_self))
 
 
 if __name__ == '__main__':
@@ -129,7 +181,7 @@ if __name__ == '__main__':
     parser.add_argument('--tcp-window-size', default='416K', help="in bytes (K/M/G suffixes allowed)")
     parser.add_argument('--bandwidth', help="in bits per second (K/M/G suffixes allowed)")
 
-    if sys.platform == 'linux':
-        parser.add_argument('--cpu', type=int, help="Bind all iperf processes to a specific CPU core")
+    parser.add_argument('--cpuset', type=str, help="Bind all iperf processes to a specific CPU core(s)")
+    parser.add_argument('--cpulimit', type=int, help="Limit CPU usage (in %, 1 core = 100%)", default=100)
 
     test(**vars(parser.parse_args()))
